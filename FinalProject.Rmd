@@ -1,0 +1,497 @@
+---
+title: "Final Project"
+author: "Isuri Willaddara Gamage"
+date: "11/29/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+#install.packages('Amelia')
+#load R libraries
+library(car)
+library(ggplot2)
+library(corrplot)
+library(caret)
+library(dplyr)
+library(Amelia)#visualize missing values
+library(purrr)
+library(tidyr)
+#correlation plot
+library(corrplot)
+library(RColorBrewer)
+library(ggformula)
+library(pROC)
+
+library(leaps)
+library(FNN)
+```
+
+Read data set and study variables
+
+```{r}
+miami_housing = read.csv("miami-housing.csv")
+head(miami_housing)
+#summary of the data
+summary(miami_housing)
+
+#remove LATITUDE, LONGITUDE and PARCELNO from the dataset
+miami_housing = miami_housing %>%
+  dplyr::select(-c(LATITUDE, LONGITUDE, PARCELNO))
+
+#checking missing values in the dataset
+#there are no missing values in the dataset
+missmap(miami_housing,col=c('yellow','black'),y.at=1,y.labels='',legend=TRUE)
+
+#create data frame to visualize quantitative variables
+miami_hist = miami_housing %>%
+  dplyr::select(-c(avno60plus, month_sold, structure_quality))
+#create histogram to check the skewness of data
+miami_hist %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_histogram()
+```
+Transforming Data
+
+```{r}
+# adding +1 for each variable when log transforming to avoid getting INF values for 0s
+miami_housing = miami_housing %>%
+  mutate(log.age = log(age + 1),
+         log.LND_SQFOOT = log(LND_SQFOOT + 1),
+         log.TOT_LVG_AREA = log(TOT_LVG_AREA + 1),
+         log.SPEC_FEAT_VAL = log(SPEC_FEAT_VAL + 1),
+         log.RAIL_DIST = log(RAIL_DIST + 1),
+         log.OCEAN_DIST = log(OCEAN_DIST + 1),
+         log.WATER_DIST = log(WATER_DIST + 1),
+         log.CNTR_DIST = log(CNTR_DIST + 1),
+         log.SUBCNTR_DI = log(SUBCNTR_DI + 1),
+         log.HWY_DIST = log(HWY_DIST + 1),
+         log.SALE_PRC = log(SALE_PRC))%>%
+ dplyr::select(-c(age, LND_SQFOOT, TOT_LVG_AREA, SPEC_FEAT_VAL, RAIL_DIST, OCEAN_DIST,      WATER_DIST,CNTR_DIST, SUBCNTR_DI, HWY_DIST, SALE_PRC)) 
+
+#create data frame to visualize quantitative variables
+miami_hist2 = miami_housing %>%
+  dplyr::select(-c(avno60plus, month_sold, structure_quality))
+#create histogram to check the skewness of data
+miami_hist2 %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_histogram()
+```
+Categorical Variables
+
+```{r}
+#tell R to treat categorical variables as factors
+miami_housing = miami_housing %>%
+  mutate(avno60plus = factor(avno60plus),
+         month_sold = factor(month_sold),
+         structure_quality = factor(structure_quality))
+```
+
+Correlation plot
+
+```{r}
+# Take only the numeric variables
+miami_numeric = select_if(miami_housing, is.numeric)
+
+# Compute correlation matrix
+correlations <- cor(miami_numeric,
+	  use = "pairwise.complete.obs")
+
+# Make the correlation plot
+corrplot(correlations,
+	type = "upper", order = "hclust",
+	col = rev(brewer.pal(n = 8, name = "RdYlBu")))
+```
+Test VIF
+
+```{r}
+fit <- lm(log.SALE_PRC ~ ., data = miami_housing)
+vif(fit)
+```
+```{r}
+regfit.full = regsubsets(log.SALE_PRC ~ . , data = miami_housing,
+                   method = "exhaustive", nvmax = 26)
+plot(regfit.full)
+
+regfit.summary = summary(regfit.full)
+which.min(regfit.summary$bic)
+```
+Perform 5-fold cross-validation to choose the best size of linear model
+
+```{r}
+# Define a predict() function for regsubsets objects
+predict.regsubsets <- function(object, alldata, subset, id, ...){
+    form = as.formula(object$call[[2]])
+    mat = model.matrix(form, alldata)
+    mat = mat[subset, ]
+    
+    if(sum(subset) == 1 | length(subset) == 1){
+      # For LOOCV, convert mat to a matrix
+      mat = t(as.matrix(mat))
+    }
+    
+    coefi = coef(object, id=id)
+    xvars = names(coefi)
+    mat[ , xvars] %*% coefi
+} # end function predict.regsubsets
+
+```
+
+```{r}
+n = dim(miami_housing)[1]
+ngroups = 5 # 5 fold cross validation
+groups = rep(1:ngroups, length = n)
+
+set.seed(3)
+cvgroups = sample(groups, n)
+
+nvar = 26
+group_error = matrix(NA, nr = ngroups, nc = nvar) 
+              # row = fold, 
+              # column = model size (number of variables)
+
+for(ii in 1:ngroups){ # iterate over folds
+  groupii = (cvgroups == ii)
+  train_data = miami_housing[!groupii, ]
+  test_data = miami_housing[groupii, ]
+  
+  
+  cv_fit = regsubsets(log.SALE_PRC ~ ., 
+                data = train_data, nvmax = nvar)
+
+    
+  for(jj in 1:nvar){ # iterate over model size
+    
+    y_pred = predict(cv_fit, alldata = miami_housing, 
+                     subset = groupii, id = jj)
+
+    MSE = mean((test_data$log.SALE_PRC - y_pred)^2)
+    group_error[ii, jj] = MSE
+    
+      
+  } # end iteration over model size
+} # end iteration over folds
+```
+
+```{r}
+MSE_overall = apply(group_error, 2, mean)
+#gf_point(MSE_overall ~ 1:nvar)
+low_MSE_model = which.min(MSE_overall)
+low_MSE_model
+
+std_err = apply(group_error, 2, sd)/sqrt(ngroups)
+std_err[low_MSE_model]
+which(MSE_overall <= MSE_overall[low_MSE_model] +
+                     std_err[low_MSE_model])
+
+coef(cv_fit, 12)
+
+#MSE_overall
+
+```
+KNN - Find the optimal K values range
+
+```{r}
+set.seed(3)
+groups = c(rep(1, 9288), rep(2, 4644)) # 1 represents the training set
+random_groups = sample(groups, 13932)
+
+in_train = (random_groups == 1)
+
+```
+
+```{r}
+#month sold will not include in the model as we can see that is not make significant difference to house sale price. Since this dataset for year 2016, I will exclude month sold from all the models
+x_train <- miami_housing %>%
+  dplyr::select(-c(month_sold)) %>%
+  filter(in_train)
+x_test <- miami_housing %>%
+  dplyr::select(-c(month_sold)) %>%
+  filter(!in_train)
+
+x_train = scale(x_train)
+    attr(x_train, "scaled:center")
+    attr(x_train, "scaled:scale")
+    
+x_test = scale(x_test, center = attr(x_train, "scaled:center"), 
+                           scale = attr(x_train, "scaled:scale"))
+```
+```{r}
+K_vals = seq(1, 150, by = 2)
+accuracy = numeric(length = length(K_vals))
+
+for(ii in 1:length(K_vals)){
+  predictions = knn.reg(train = x_train, 
+                  test  = x_test,
+                  y = miami_housing$log.SALE_PRC[in_train],
+                  k = K_vals[ii])
+  conf_mat = table(predictions$pred,
+                miami_housing$log.SALE_PRC[!in_train])
+  accuracy[ii] = sum(diag(conf_mat))/4644
+}
+gf_line(accuracy ~ K_vals, lwd = 1)
+
+#it seems highest accuracy K value is 1 therefore I will use K values 1:20 for model selection
+```
+Model Selection - Single layer 5 fold cross validation
+
+```{r}
+# Linear
+#Previously selected vatriables with low MSE vales
+Model1 = (log.SALE_PRC ~ structure_quality+log.age+log.LND_SQFOOT+log.TOT_LVG_AREA+
+            log.SPEC_FEAT_VAL+log.OCEAN_DIST+log.WATER_DIST+log.SUBCNTR_DI+log.HWY_DIST) 
+
+Model2 = (log.SALE_PRC ~ . - month_sold) # all except month_sold
+allLinModels = list(Model1,Model2)
+
+# kNN 
+allkNN = 1:20
+# model counts and types
+mLin = length(allLinModels); mkNN = length(allkNN)
+mmodels = mLin+mkNN
+modelMethod = c(rep("Linear",mLin),rep("kNN",mkNN))
+
+############# Cross-validation via for loop #############
+# produce loops for 5-fold cross-validation for model selection
+n = dim(miami_housing)[1]
+nfolds = 5
+groups = rep(1:nfolds,length=n)  #produces list of group labels
+set.seed(3)
+cvgroups = sample(groups,n)  #orders randomly
+
+# set up storage for CV values
+allmodelCV = rep(NA,mmodels) #place-holder for results
+
+# cross-validation of linear models
+for (m in 1:mLin) {
+  allpredictedCV = rep(NA,n)
+  for (i in 1:nfolds) {
+    groupi = (cvgroups == i)
+    
+    #prediction via cross-validation
+    lmfitCV = lm(formula = allLinModels[[m]],data=miami_housing,subset=!groupi)
+    allpredictedCV[groupi] = predict.lm(lmfitCV,miami_housing[groupi,])
+    allmodelCV[m] = mean((allpredictedCV - miami_housing$log.SALE_PRC)^2)
+  }
+}
+```
+
+```{r}
+#do not include month_sold 
+x.miami_housing = miami_housing %>%
+  dplyr::select(-c(month_sold)) %>%
+  mutate(avno60plus = is.numeric(avno60plus),
+         structure_quality = is.numeric(structure_quality))
+
+#which(is.na(x.miami_housing))
+# cross-validation of kNN models (with standardization)
+for (k in 1:mkNN) {
+  allpredictedCV = rep(NA,n)
+  for (i in 1:nfolds)  {
+    groupi = (cvgroups == i)
+
+    train.x = x.miami_housing[cvgroups != i,]
+    #train.x.std = scale(train.x)
+    valid.x = x.miami_housing[cvgroups == i,]
+    #valid.x.std = scale(valid.x, 
+                       # center = attr(train.x.std, "scaled:center"), 
+                       # scale = attr(train.x.std, "scaled:scale"))
+    predictedCV = knn.reg(train.x, valid.x, miami_housing$log.SALE_PRC[!groupi], 
+                          k = k)
+    allpredictedCV[groupi] = predictedCV$pred
+  }
+  # must store in consecutive spots
+  allmodelCV[mLin+k] = mean((allpredictedCV - miami_housing$log.SALE_PRC)^2)
+}
+```
+
+```{r}
+############# identify selected model to fit to full data #############
+order.min = which.min(allmodelCV)
+LinModel = ifelse(modelMethod[order.min] == "Linear", 
+                 allLinModels[[order.min]],
+                 "not best")
+kNNpar = ifelse(modelMethod[order.min] == "kNN", 
+                 allkNN[order.min-mLin], 
+                 "not best")
+
+LinModel
+kNNpar
+
+```
+```{r}
+############# compare all models #############
+# compute RMSE = sqrt(CV) and plot
+results = data.frame(RMSE = sqrt(allmodelCV),modelMethod=modelMethod)
+coloptions = rainbow(4)
+colused = coloptions[as.numeric(factor(modelMethod))+1]
+charused = 5*(as.numeric(factor(modelMethod)))
+plot(1:mmodels,results$RMSE,col=colused,pch=charused,
+     xlab = "Model label",ylab = "RMSE")
+abline(v=order.min,col="red")
+```
+Double cross validation for model selection
+
+```{r}
+###################################################################
+##### Double cross-validation for modeling-process assessment #####				 
+###################################################################
+
+##### model assessment OUTER shell #####
+# produce loops for 5-fold cross-validation for model ASSESSMENT
+nfolds = 5
+groups = rep(1:nfolds,length=n)  #produces list of group labels
+set.seed(3)
+cvgroups = sample(groups,n)  #orders randomly
+
+# set up storage for predicted values from the double-cross-validation
+allpredictedCV = rep(NA,n)
+# set up storage to see what models are "best" on the inner loops
+allbestTypes = rep(NA,nfolds)
+allbestPars = vector("list",nfolds)
+
+# loop through outer splits
+for (j in 1:nfolds)  {  #be careful not to re-use loop indices
+  groupj = (cvgroups == j)
+  traindata = miami_housing[!groupj,]
+  trainx = model.matrix(log.SALE_PRC ~ . -month_sold, data = traindata)[,-1]
+  trainy = traindata$log.SALE_PRC
+  validdata = miami_housing[groupj,]
+  validx = model.matrix(log.SALE_PRC ~ . -month_sold, data = validdata)[,-1]
+  validy = validdata$log.SALE_PRC
+  
+  #specify data to be used
+  dataused=traindata
+
+  set.seed(4)
+  training = trainControl(method = "cv", number = 5)
+
+  fit_caret_lm1 = train(log.SALE_PRC ~ structure_quality+log.age+log.LND_SQFOOT
+                        +log.TOT_LVG_AREA+log.SPEC_FEAT_VAL+log.OCEAN_DIST
+                        +log.WATER_DIST+ log.SUBCNTR_DI+log.HWY_DIST,
+                        data = dataused,
+                        method = "lm",
+                        trControl = training)
+  
+  # cross-validation of linear model 2
+  fit_caret_lm2 = train(log.SALE_PRC ~ . - month_sold,
+                        data = dataused,
+                        method = "lm",
+                        trControl = training)
+  
+
+  # cross-validation of kNN models (with standardization)
+  fit_caret_kNN = train(log.SALE_PRC ~ . -month_sold,
+                        data = dataused,
+                        method = "knn",
+                        trControl = training,
+                        preProcess = c("center","scale"),
+                        tuneGrid = expand.grid(k = allkNN))
+  
+  ############# identify selected model to fit to full data #############
+  # all best models
+  all_best_Types = c("Linear","Linear","kNN")
+  all_best_Pars = list(9,12,fit_caret_kNN$bestTune)
+  all_best_Models = list(fit_caret_lm1$finalModel,
+                         fit_caret_lm2$finalModel,
+                         fit_caret_kNN)
+  all_best_RMSE = c(fit_caret_lm1$results$RMSE,
+                    fit_caret_lm2$results$RMSE,
+                    min(fit_caret_kNN$results$RMSE))
+ 
+    ############# compare all models - visual understanding #############
+  # model counts and types
+  mLin = length(allLinModels); mkNN = length(allkNN)
+  mmodels = mLin+mkNN
+  modelMethod = c(rep("Linear",mLin),rep("kNN",mkNN))
+  all_caret_RMSE = c(fit_caret_lm1$results$RMSE,
+                     fit_caret_lm2$results$RMSE,
+                     fit_caret_kNN$results$RMSE)
+  coloptions = rainbow(4)
+  colused = coloptions[as.numeric(factor(modelMethod))+1]
+  charused = 5*(as.numeric(factor(modelMethod)))
+  plot(1:mmodels,all_caret_RMSE,col=colused,pch=charused,
+       xlab = "Model label",ylab = "RMSE",
+       ylim=c(min(all_caret_RMSE)+c(-.1,.5)))
+  order.min = c(1,2,
+                2+which.min(fit_caret_kNN$results$RMSE))
+  abline(v=order.min,lwd=2)
+  abline(v=which.min(all_caret_RMSE),col="red",lwd=2)
+  
+  one_best_Type = all_best_Types[which.min(all_best_RMSE)]
+  one_best_Pars = all_best_Pars[which.min(all_best_RMSE)]
+  one_best_Model = all_best_Models[[which.min(all_best_RMSE)]]
+
+  allbestTypes[j] = one_best_Type
+  allbestPars[[j]] = one_best_Pars
+  
+  if (one_best_Type == "Linear") {  # then best is one of linear models
+    allpredictedCV[groupj] = predict(one_best_Model,validdata)
+  } else if (one_best_Type == "kNN") {  # then best is one of kNN models
+    allpredictedCV[groupj] = one_best_Model %>% predict(validdata)
+  } 
+  
+}
+```
+
+```{r}
+allbestTypes
+allbestPars
+# print individually
+for (j in 1:nfolds) {
+  writemodel = paste("The best model at loop", j, 
+                     "is of type", allbestTypes[j],
+                     "with parameter(s)",allbestPars[[j]])
+  print(writemodel, quote = FALSE)
+}
+
+#assessment
+y = miami_housing$log.SALE_PRC
+RMSE = sqrt(mean(allpredictedCV-y)^2); RMSE
+R2 = 1-sum((allpredictedCV-y)^2)/sum((y-mean(y))^2); R2
+# about 90% of the variability in SALE PRICE values is 
+# explained by this model-fitting process
+```
+Variable importance
+```{r}
+fit_caret_kNN = train(log.SALE_PRC ~ . -month_sold,
+                        data = miami_housing,
+                        method = "knn",
+                        trControl = training,
+                        preProcess = c("center","scale"),
+                        tuneGrid = expand.grid(k = 4))# best K value found from single and   double cross validation
+
+#find the most important variables
+knn_Imp <- varImp(fit_caret_kNN, scale = FALSE)
+knn_Imp
+
+
+```
+Relationship between the SALE PRICE and most important predictors
+
+```{r}
+ggplot(knn_Imp)
+gf_point(log.SALE_PRC ~ log.TOT_LVG_AREA, data = miami_housing, color = "navy", shape = 15,alpha = .4,  xlab = "Total living area", ylab = "Sale Price",
+           title = "Sale price and house size in Miami")
+gf_point(log.SALE_PRC ~ log.OCEAN_DIST, data = miami_housing, color = "navy", shape = 15, alpha = .4, xlab = "Distance to Ocean", ylab = "Sale Price",
+           title = "Sale price and distance to ocean in Miami")
+gf_point(log.SALE_PRC ~ log.SPEC_FEAT_VAL, data = miami_housing, color = "navy", shape = 15, alpha = .4, xlab = "Special features", ylab = "Sale Price",
+           title = "Sale price and Special features")
+
+```
+
+
+
+
+
